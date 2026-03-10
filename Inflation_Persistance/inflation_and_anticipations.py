@@ -69,6 +69,7 @@ from statsmodels.stats.contrast import WaldTestResults
 from statsmodels.tsa.vector_ar.vecm import VECM
 from arch import arch_model
 from statsmodels.tsa.api import VAR
+from pandas_datareader import data as web
 
 
 # ------------------------------------------------------------
@@ -670,3 +671,56 @@ gc = var_res.test_causality(caused="pai_exp_infl", causing=["infl_vol"], kind="f
 print("\n=== Granger Causality Test: volatility -> expectations ===")
 print("H0: lags of infl_vol do not help predict pai_exp_infl")
 print(gc.summary())
+
+
+# ============================================================
+# US Macro VAR from FRED (Inflation, GDP, Interest Rate)
+# Cholesky ordering: inflation -> gdp_growth -> interest_rate
+# ============================================================
+
+start_date = "1985-01-01"
+end_date = pd.Timestamp.today().strftime("%Y-%m-%d")
+
+# FRED series:
+# CPIAUCSL  : CPI (monthly)
+# GDPC1     : Real GDP (quarterly)
+# FEDFUNDS  : Federal Funds Rate (monthly)
+cpi_m = web.DataReader("CPIAUCSL", "fred", start_date, end_date)
+gdp_q = web.DataReader("GDPC1", "fred", start_date, end_date)
+ffr_m = web.DataReader("FEDFUNDS", "fred", start_date, end_date)
+
+# Convert monthly series to quarterly averages to match GDP frequency.
+cpi_q = cpi_m.resample("Q").mean()
+ffr_q = ffr_m.resample("Q").mean()
+
+df_us = pd.concat([cpi_q, gdp_q, ffr_q], axis=1)
+df_us.columns = ["cpi", "gdp", "interest_rate"]
+
+# Stationary transformations for VAR:
+# inflation  : annualized quarterly CPI inflation (log-diff)
+# gdp_growth : annualized quarterly real GDP growth (log-diff)
+df_us["inflation"] = 400 * np.log(df_us["cpi"]).diff()
+df_us["gdp_growth"] = 400 * np.log(df_us["gdp"]).diff()
+
+df_var_us = df_us[["inflation", "gdp_growth", "interest_rate"]].dropna()
+
+us_var_model = VAR(df_var_us)
+us_lag_sel = us_var_model.select_order(maxlags=8)
+us_p = us_lag_sel.selected_orders.get("aic", 4)
+if us_p is None:
+    us_p = 4
+
+us_var_res = us_var_model.fit(us_p)
+
+print("\n=== US VAR (FRED) ===")
+print(f"Sample: {df_var_us.index.min().date()} to {df_var_us.index.max().date()}")
+print(f"Lag (AIC): p = {us_p}")
+print("Variable order for Cholesky:", df_var_us.columns.tolist())
+print(us_var_res.summary())
+
+# Orthogonalized IRFs use Cholesky decomposition based on variable order above.
+us_irf = us_var_res.irf(12)
+us_irf.plot(orth=True)
+plt.suptitle("US VAR Orthogonalized IRFs (Cholesky: inflation first)", y=1.02)
+plt.tight_layout()
+plt.show()
